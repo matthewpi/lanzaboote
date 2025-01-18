@@ -41,3 +41,10 @@ pub fn pe_section<'a>(pe_data: &'a [u8], section_name: &str) -> Option<Vec<u8>> 
 pub fn pe_section_as_string<'a>(pe_data: &'a [u8], section_name: &str) -> Option<String> {
     pe_section(pe_data, section_name).and_then(|data| String::from_utf8(data).ok())
 }
+
+/// Extract a string, stored as UTF-8, from a PE section.
+pub fn extract_string(pe_data: &[u8], section: &str) -> uefi::Result<uefi::CString16> {
+    let string = pe_section_as_string(pe_data, section).ok_or(uefi::Status::INVALID_PARAMETER)?;
+
+    Ok(uefi::CString16::try_from(string.as_str()).map_err(|_| uefi::Status::INVALID_PARAMETER)?)
+}
