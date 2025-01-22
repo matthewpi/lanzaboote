@@ -42,6 +42,10 @@ struct InstallCommand {
     #[arg(long)]
     systemd_boot_loader_config: PathBuf,
 
+    /// Systemd-pcrlock directory
+    #[arg(long)]
+    systemd_pcrlock: PathBuf,
+
     /// sbsign Public Key
     #[arg(long)]
     public_key: Option<PathBuf>,
@@ -100,6 +104,7 @@ fn install(args: InstallCommand) -> Result<()> {
         Architecture::from_nixos_system(&args.system)?,
         args.systemd,
         args.systemd_boot_loader_config,
+        args.systemd_pcrlock,
         local_signer,
         args.configuration_limit,
         args.esp,

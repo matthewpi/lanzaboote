@@ -135,6 +135,7 @@ in
           --system ${config.boot.kernelPackages.stdenv.hostPlatform.system} \
           --systemd ${config.systemd.package} \
           --systemd-boot-loader-config ${loaderConfigFile} \
+          --systemd-pcrlock /var/lib/pcrlock.d \
           --public-key ${cfg.publicKeyFile} \
           --private-key ${cfg.privateKeyFile} \
           --configuration-limit ${toString configurationLimit} \

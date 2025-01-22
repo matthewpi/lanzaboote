@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::prelude::{OsStrExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::string::ToString;
 
 use anyhow::{anyhow, Context, Result};
@@ -30,6 +32,7 @@ pub struct Installer<S: Signer> {
     lanzaboote_stub: PathBuf,
     systemd: PathBuf,
     systemd_boot_loader_config: PathBuf,
+    systemd_pcrlock: PathBuf,
     signer: S,
     configuration_limit: usize,
     esp_paths: SystemdEspPaths,
@@ -44,6 +47,7 @@ impl<S: Signer> Installer<S> {
         arch: Architecture,
         systemd: PathBuf,
         systemd_boot_loader_config: PathBuf,
+        systemd_pcrlock: PathBuf,
         signer: S,
         configuration_limit: usize,
         esp: PathBuf,
@@ -59,6 +63,7 @@ impl<S: Signer> Installer<S> {
             lanzaboote_stub,
             systemd,
             systemd_boot_loader_config,
+            systemd_pcrlock,
             signer,
             configuration_limit,
             esp_paths,
@@ -261,13 +266,62 @@ impl<S: Signer> Installer<S> {
         let lanzaboote_image_path = lanzaboote_image(&tempdir, &parameters)
             .context("Failed to build and sign lanzaboote stub image.")?;
 
+        let stub_name = stub_name(generation, &self.signer).context("Get stub name")?;
         let stub_target = self
             .esp_paths
             .linux
-            .join(stub_name(generation, &self.signer).context("Get stub name")?);
+            .join(&stub_name);
         self.gc_roots.extend([&stub_target]);
         install_signed(&self.signer, &lanzaboote_image_path, &stub_target)
             .context("Failed to install the Lanzaboote stub.")?;
+
+        // Lock the lanzaboote stub, we will still need to lock the kernel and
+        // initrd separately, but the stub is needed for PCR 4.
+        self.systemd_pcrlock(&vec![
+            OsString::from("lock-pe"),
+            format!(
+                "--pcrlock={}.pcrlock",
+                self.systemd_pcrlock
+                    .join("650-lanzastub.pcrlock.d")
+                    .join(&stub_name)
+                    .to_str()
+                    .unwrap(),
+            ).into(),
+            stub_target.into(),
+        ]);
+
+        // self.systemd_pcrlock(&vec![
+        //     OsString::from("lock-kernel-initrd"),
+        //     format!(
+        //         "--pcrlock={}.pcrlock",
+        //         self.systemd_pcrlock
+        //             .join("650-lanzastub.pcrlock.d")
+        //             .join(&stub_name)
+        //             .to_str()
+        //             .unwrap(),
+        //     ).into(),
+        //     stub_target.into(),
+        // ]);
+
+        // Write the cmdline to a file so we can easily provide it to
+        // systemd-pcrlock.
+        // TODO: see if we can use stdin instead.
+        let cmdline_path = tempdir.path().join("cmdline");
+        std::fs::write(&cmdline_path, kernel_cmdline.join(" "))?;
+
+        // Lock the kernel command-line (PCR 9).
+        self.systemd_pcrlock(&vec![
+            OsString::from("lock-kernel-cmdline"),
+            format!(
+                "--pcrlock={}.pcrlock",
+                self.systemd_pcrlock
+                    .join("710-kernel-cmdline.pcrlock.d")
+                    .join(&stub_name)
+                    .to_str()
+                    .unwrap(),
+            ).into(),
+            (&cmdline_path).into(),
+        ]);
 
         Ok(())
     }
@@ -348,6 +402,19 @@ impl<S: Signer> Installer<S> {
             if newer_systemd_boot_available || !systemd_boot_is_signed {
                 install_signed(&self.signer, from, to)
                     .with_context(|| format!("Failed to install systemd-boot binary to: {to:?}"))?;
+
+                self.systemd_pcrlock(&vec![
+                    OsString::from("lock-pe"),
+                    format!(
+                        "--pcrlock={}.pcrlock",
+                        self.systemd_pcrlock
+                            .join("630-boot-loader.pcrlock.d")
+                            .join(to.file_name().unwrap())
+                            .to_str()
+                            .unwrap(),
+                    ).into(),
+                    to.into(),
+                ]);
             }
         }
 
@@ -361,6 +428,39 @@ impl<S: Signer> Installer<S> {
                 &self.esp_paths.systemd_boot_loader_config
             )
         })?;
+
+        self.systemd_pcrlock(&vec![
+            OsString::from("lock-raw"),
+            OsString::from("--pcr=5"),
+            format!(
+                "--pcrlock={}",
+                self.systemd_pcrlock
+                    .join("640-boot-loader-config.pcrlock.d/generated.pcrlock")
+                    .to_str()
+                    .unwrap(),
+            ).into(),
+            (&self.esp_paths.systemd_boot_loader_config).into(),
+        ]);
+
+        Ok(())
+    }
+
+    fn systemd_pcrlock(&self, args: &Vec<OsString>) -> Result<()> {
+        let systemd_pcrlock = self
+            .systemd
+            .join("lib/systemd/systemd-pcrlock");
+
+        let output = Command::new(systemd_pcrlock)
+            .args(args)
+            .output()
+            .context("Failed to run systemd-pcrlock. Most likely, the binary is not on PATH.")?;
+        if !output.status.success() {
+            std::io::stderr()
+                .write_all(&output.stderr)
+                .context("Failed to write output of systemd-pcrlock to stderr.")?;
+            log::debug!("systemd-pcrlock failed with args: `{args:?}`.");
+            return Err(anyhow!("Failed to run systemd-pcrlock."));
+        }
 
         Ok(())
     }
