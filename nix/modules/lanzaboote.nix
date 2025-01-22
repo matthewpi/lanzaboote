@@ -1,9 +1,8 @@
-{
-  lib,
-  config,
-  options,
-  pkgs,
-  ...
+{ lib
+, config
+, options
+, pkgs
+, ...
 }:
 let
   cfg = config.boot.lanzaboote;
@@ -26,6 +25,7 @@ let
     ${cfg.installCommand} \
       --public-key ${cfg.publicKeyFile} \
       --private-key ${cfg.privateKeyFile} \
+      --systemd-pcrlock /var/lib/pcrlock.d \
       ${efiSysMountPoint} \
       /nix/var/nix/profiles/system-*-link
   '';
