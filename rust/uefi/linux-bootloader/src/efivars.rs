@@ -47,6 +47,7 @@ bitflags! {
     #[repr(transparent)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
     /// Feature flags as described in https://systemd.io/BOOT_LOADER_INTERFACE/
+    /// https://github.com/systemd/systemd/blob/v257.2/src/fundamental/efivars-fundamental.h#L11
     pub struct EfiLoaderFeatures: u64 {
        const ConfigTimeout = 1 << 0;
        const ConfigTimeoutOneShot = 1 << 1;
@@ -59,6 +60,10 @@ bitflags! {
        const SortKey = 1 << 8;
        const SavedEntry = 1 << 9;
        const DeviceTree = 1 << 10;
+       const SecureBootEnroll = 1 << 11;
+       const RetainShim = 1 << 12;
+       const MenuDisable = 1 << 13;
+       const MultiProfileUKI = 1 << 14;
     }
 }
 
@@ -98,6 +103,7 @@ bitflags! {
     #[repr(transparent)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     /// Feature flags as described in https://www.freedesktop.org/software/systemd/man/systemd-stub.html
+    // https://github.com/systemd/systemd/blob/v257.2/src/fundamental/efivars-fundamental.h#L28
     pub struct EfiStubFeatures: u64 {
        /// Is `LoaderDevicePartUUID` loaded in UEFI variables?
        const ReportBootPartition = 1 << 0;
@@ -109,6 +115,18 @@ bitflags! {
        const ThreePcrs = 1 << 3;
        /// Can we pass a random seed to the kernel?
        const RandomSeed = 1 << 4;
+       /// Are `.cmdline`s picked up from addons?
+       const CmdlineAddons = 1 << 5;
+       /// Are `.cmdline`s picked up from SMBIOS Type 11?
+       const CmdlineSMBIOS = 1 << 6;
+       /// Are `.dtb`s picked up from addons?
+       const DeviceTreeAddons = 1 << 7;
+       /// Are system config extensions picked up from the boot partition.
+       const PickUpConfExts = 1 << 8;
+       /// ?
+       const MultiProfileUKI = 1 << 9;
+       /// ?
+       const ReportStubPartition = 1 << 10;
     }
 }
 
@@ -162,12 +180,40 @@ where
 /// Exports systemd-stub style EFI variables
 pub fn export_efi_variables(stub_info_name: &str) -> Result<()> {
     let stub_features: EfiStubFeatures =
-        EfiStubFeatures::ReportBootPartition | EfiStubFeatures::PickUpCredentials | EfiStubFeatures::PickUpSysExts | EfiStubFeatures::ThreePcrs;
+        EfiStubFeatures::ReportBootPartition
+        | EfiStubFeatures::PickUpCredentials
+        | EfiStubFeatures::PickUpSysExts
+        | EfiStubFeatures::ThreePcrs
+        | EfiStubFeatures::ReportStubPartition;
 
     let loaded_image = boot::open_protocol_exclusive::<LoadedImage>(boot::image_handle())?;
 
     let default_attributes =
         VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS;
+
+    let image_part_uuid = disk_get_part_uuid(loaded_image.device().ok_or(uefi::Status::NOT_FOUND)?).map(|guid| {
+        guid.to_string()
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect::<Vec<u8>>()
+    });
+
+    let image_identifier = if let Some(dp) = loaded_image.file_path() {
+        let dp_protocol = boot::open_protocol_exclusive::<DevicePathToText>(
+            boot::get_handle_for_protocol::<DevicePathToText>()?,
+        )?;
+        dp_protocol
+            .convert_device_path_to_text(
+                dp,
+                uefi::proto::device_path::text::DisplayOnly(false),
+                uefi::proto::device_path::text::AllowShortcuts(false),
+            )
+            .map(|ps| cstr16_to_bytes(&ps).to_vec())
+    } else {
+        // If we cannot retrieve the filepath of the loaded image
+        // Then, we cannot set `LoaderImageIdentifier`.
+        Err(uefi::Status::UNSUPPORTED.into())
+    };
 
     #[allow(unused_must_use)]
     // LoaderDevicePartUUID
@@ -175,14 +221,7 @@ pub fn export_efi_variables(stub_info_name: &str) -> Result<()> {
         cstr16!("LoaderDevicePartUUID"),
         &BOOT_LOADER_VENDOR_UUID,
         default_attributes,
-        || {
-            disk_get_part_uuid(loaded_image.device().ok_or(uefi::Status::NOT_FOUND)?).map(|guid| {
-                guid.to_string()
-                    .encode_utf16()
-                    .flat_map(|c| c.to_le_bytes())
-                    .collect::<Vec<u8>>()
-            })
-        },
+        || { image_part_uuid.clone() },
     )
     .ok();
     // LoaderImageIdentifier
@@ -190,24 +229,7 @@ pub fn export_efi_variables(stub_info_name: &str) -> Result<()> {
         cstr16!("LoaderImageIdentifier"),
         &BOOT_LOADER_VENDOR_UUID,
         default_attributes,
-        || {
-            if let Some(dp) = loaded_image.file_path() {
-                let dp_protocol = boot::open_protocol_exclusive::<DevicePathToText>(
-                    boot::get_handle_for_protocol::<DevicePathToText>()?,
-                )?;
-                dp_protocol
-                    .convert_device_path_to_text(
-                        dp,
-                        uefi::proto::device_path::text::DisplayOnly(false),
-                        uefi::proto::device_path::text::AllowShortcuts(false),
-                    )
-                    .map(|ps| cstr16_to_bytes(&ps).to_vec())
-            } else {
-                // If we cannot retrieve the filepath of the loaded image
-                // Then, we cannot set `LoaderImageIdentifier`.
-                Err(uefi::Status::UNSUPPORTED.into())
-            }
-        },
+        || { image_identifier.clone() },
     )
     .ok();
     // LoaderFirmwareInfo
@@ -261,6 +283,23 @@ pub fn export_efi_variables(stub_info_name: &str) -> Result<()> {
         &BOOT_LOADER_VENDOR_UUID,
         default_attributes,
         &stub_features.bits().to_le_bytes(),
+    )
+    .ok();
+
+    // StubDevicePartUUID
+    ensure_efi_variable(
+        cstr16!("StubDevicePartUUID"),
+        &BOOT_LOADER_VENDOR_UUID,
+        default_attributes,
+        || { image_part_uuid },
+    )
+    .ok();
+    // StubImageIdentifier
+    ensure_efi_variable(
+        cstr16!("StubImageIdentifier"),
+        &BOOT_LOADER_VENDOR_UUID,
+        default_attributes,
+        || { image_identifier },
     )
     .ok();
 
