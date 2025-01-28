@@ -1,3 +1,4 @@
+mod build;
 mod common;
 mod gc;
 mod install;

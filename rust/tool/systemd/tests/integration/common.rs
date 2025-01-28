@@ -134,6 +134,54 @@ fn random_string(length: usize) -> String {
         .collect()
 }
 
+/// Call the `lanzaboote build` command.
+pub fn lanzaboote_build(
+    esp_mountpoint: &Path,
+    generation: impl AsRef<OsStr>,
+) -> Result<Output> {
+    // To simplify the test setup, we use the systemd stub here instead of the lanzaboote stub. See
+    // the comment in setup_toplevel for details.
+    let architecture = Architecture::from_nixos_system(SYSTEM)?;
+    let test_systemd = systemd_location_from_env()?;
+    let systemd_stub_filename = systemd_stub_filename(&architecture);
+    let test_systemd_stub = format!(
+        "{test_systemd}/lib/systemd/boot/efi/{systemd_stub_filename}",
+        systemd_stub_filename = systemd_stub_filename.display()
+    );
+
+    let test_loader_config_path = tempfile::NamedTempFile::new()?;
+    let test_loader_config = r"timeout 0\nconsole-mode 1\n";
+    fs::write(test_loader_config_path.path(), test_loader_config)?;
+
+    let mut cmd = Command::cargo_bin("lzbt-systemd")?;
+    let output = cmd
+        .env("LANZABOOTE_STUB", test_systemd_stub)
+        .arg("-vv")
+        .arg("build")
+        .arg("--system")
+        .arg(SYSTEM)
+        .arg("--public-key")
+        .arg("tests/fixtures/uefi-keys/db.pem")
+        .arg("--private-key")
+        .arg("tests/fixtures/uefi-keys/db.key")
+        .arg(esp_mountpoint)
+        .arg(generation)
+        .output()?;
+
+    // Print debugging output.
+    // This is a weird hack to make cargo test capture the output.
+    // See https://github.com/rust-lang/rust/issues/12309
+    print!("{}", String::from_utf8(output.stdout.clone())?);
+    print!("{}", String::from_utf8(output.stderr.clone())?);
+
+    // Also walk the entire ESP mountpoint and print each path for debugging
+    for entry in walkdir::WalkDir::new(esp_mountpoint) {
+        println!("{}", entry?.path().display());
+    }
+
+    Ok(output)
+}
+
 /// Call the `lanzaboote install` command.
 pub fn lanzaboote_install(
     config_limit: u64,
