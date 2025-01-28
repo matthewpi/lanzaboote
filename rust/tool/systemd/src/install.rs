@@ -11,6 +11,7 @@ use std::string::ToString;
 use anyhow::{anyhow, Context, Result};
 use base32ct::{Base32Unpadded, Encoding};
 use nix::unistd::syncfs;
+use nix::NixPath;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -182,17 +183,8 @@ impl<S: Signer> Installer<S> {
         Ok(())
     }
 
-    /// Install the given `Generation`.
-    ///
-    /// The kernel and initrd are content-addressed, and the stub name identifies the generation.
-    /// Hence, this function cannot overwrite files of other generations with different contents.
-    /// All installed files are added as garbage collector roots.
-    fn install_generation(&mut self, generation: &Generation) -> Result<()> {
-        // If the generation is already properly installed, don't overwrite it.
-        if self.register_installed_generation(generation).is_ok() {
-            return Ok(());
-        }
-
+    /// TODO: document
+    pub fn build_generation(&mut self, generation: &Generation) -> Result<()> {
         let tempdir = TempDir::new().context("Failed to create temporary directory.")?;
         let bootspec = &generation.spec.bootspec.bootspec;
 
@@ -288,24 +280,12 @@ impl<S: Signer> Installer<S> {
                     .unwrap(),
             ).into(),
             stub_target.into(),
-        ]);
-
-        // self.systemd_pcrlock(&vec![
-        //     OsString::from("lock-kernel-initrd"),
-        //     format!(
-        //         "--pcrlock={}.pcrlock",
-        //         self.systemd_pcrlock
-        //             .join("650-lanzastub.pcrlock.d")
-        //             .join(&stub_name)
-        //             .to_str()
-        //             .unwrap(),
-        //     ).into(),
-        //     stub_target.into(),
-        // ]);
+        ])?;
 
         // Write the cmdline to a file so we can easily provide it to
         // systemd-pcrlock.
-        // TODO: see if we can use stdin instead.
+        //
+        // TODO: see if we can use stdin with systemd-pcrlock instead.
         let cmdline_path = tempdir.path().join("cmdline");
         std::fs::write(&cmdline_path, kernel_cmdline.join(" "))?;
 
@@ -321,9 +301,23 @@ impl<S: Signer> Installer<S> {
                     .unwrap(),
             ).into(),
             (&cmdline_path).into(),
-        ]);
+        ])?;
 
         Ok(())
+    }
+
+    /// Install the given `Generation`.
+    ///
+    /// The kernel and initrd are content-addressed, and the stub name identifies the generation.
+    /// Hence, this function cannot overwrite files of other generations with different contents.
+    /// All installed files are added as garbage collector roots.
+    fn install_generation(&mut self, generation: &Generation) -> Result<()> {
+        // If the generation is already properly installed, don't overwrite it.
+        if self.register_installed_generation(generation).is_ok() {
+            return Ok(());
+        }
+
+        self.build_generation(generation)
     }
 
     /// Register the files of an already installed generation as garbage collection roots.
@@ -378,7 +372,7 @@ impl<S: Signer> Installer<S> {
     /// to the ESP.
     ///
     /// Checking for the version also allows us to skip buggy systemd versions in the future.
-    fn install_systemd_boot(&self) -> Result<()> {
+    pub fn install_systemd_boot(&self) -> Result<()> {
         let systemd_boot = self
             .systemd
             .join("lib/systemd/boot/efi")
@@ -414,7 +408,7 @@ impl<S: Signer> Installer<S> {
                             .unwrap(),
                     ).into(),
                     to.into(),
-                ]);
+                ])?;
             }
         }
 
@@ -440,12 +434,15 @@ impl<S: Signer> Installer<S> {
                     .unwrap(),
             ).into(),
             (&self.esp_paths.systemd_boot_loader_config).into(),
-        ]);
+        ])?;
 
         Ok(())
     }
 
     fn systemd_pcrlock(&self, args: &Vec<OsString>) -> Result<()> {
+        if self.systemd.is_empty() {
+            return Ok(())
+        }
         let systemd_pcrlock = self
             .systemd
             .join("lib/systemd/systemd-pcrlock");
