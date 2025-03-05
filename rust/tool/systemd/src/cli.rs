@@ -143,7 +143,7 @@ fn build(args: BuildCommand) -> Result<()> {
         Architecture::from_nixos_system(&args.system)?,
         args.systemd.clone().unwrap_or(PathBuf::from("")),
         args.systemd_boot_loader_config.unwrap_or(PathBuf::from("")),
-        PathBuf::from(""), // args.systemd_pcrlock,
+        PathBuf::from(""), // args.systemd_pcrlock_predictions,
         local_signer,
         1, // args.configuration_limit,
         args.esp,

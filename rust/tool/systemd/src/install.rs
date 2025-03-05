@@ -1,17 +1,18 @@
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::prelude::{OsStrExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::string::ToString;
 
 use anyhow::{anyhow, Context, Result};
 use base32ct::{Base32Unpadded, Encoding};
 use nix::unistd::syncfs;
 use nix::NixPath;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -33,7 +34,7 @@ pub struct Installer<S: Signer> {
     lanzaboote_stub: PathBuf,
     systemd: PathBuf,
     systemd_boot_loader_config: PathBuf,
-    systemd_pcrlock: PathBuf,
+    systemd_pcrlock_predictions: PathBuf,
     signer: S,
     configuration_limit: usize,
     esp_paths: SystemdEspPaths,
@@ -48,7 +49,7 @@ impl<S: Signer> Installer<S> {
         arch: Architecture,
         systemd: PathBuf,
         systemd_boot_loader_config: PathBuf,
-        systemd_pcrlock: PathBuf,
+        systemd_pcrlock_predictions: PathBuf,
         signer: S,
         configuration_limit: usize,
         esp: PathBuf,
@@ -64,7 +65,7 @@ impl<S: Signer> Installer<S> {
             lanzaboote_stub,
             systemd,
             systemd_boot_loader_config,
-            systemd_pcrlock,
+            systemd_pcrlock_predictions,
             signer,
             configuration_limit,
             esp_paths,
@@ -267,41 +268,108 @@ impl<S: Signer> Installer<S> {
         install_signed(&self.signer, &lanzaboote_image_path, &stub_target)
             .context("Failed to install the Lanzaboote stub.")?;
 
+        let mut records: Vec<PcrlockRecord> = vec![];
+
         // Lock the lanzaboote stub, we will still need to lock the kernel and
         // initrd separately, but the stub is needed for PCR 4.
-        self.systemd_pcrlock(&vec![
+        if let Some(prediction) = self.systemd_pcrlock_json(&vec![
             OsString::from("lock-pe"),
-            format!(
-                "--pcrlock={}.pcrlock",
-                self.systemd_pcrlock
-                    .join("650-lanzastub.pcrlock.d")
-                    .join(&stub_name)
-                    .to_str()
-                    .unwrap(),
-            ).into(),
             stub_target.into(),
-        ])?;
+        ])? {
+            records.extend(prediction.records);
+        }
+
+        // Measure the `.linux` section name
+        if let Some(prediction) = self.systemd_pcrlock_section_name(".linux")? {
+            records.extend(prediction.records);
+        }
+
+        // Lock `.linux` from the UKI (PCR 11, String: .linux)
+        if let Some(prediction) = self.systemd_pcrlock_json(&vec![
+            OsString::from("lock-raw"),
+            OsString::from("--pcr=11"),
+            kernel_target.into(),
+        ])? {
+            records.extend(prediction.records);
+        }
+
+        // Measure the `.osrel` section name
+        if let Some(prediction) = self.systemd_pcrlock_section_name(".osrel")? {
+            records.extend(prediction.records);
+        }
+
+        // Write the os-release to a file so we can easily provide it to
+        // systemd-pcrlock.
+        let osrel_path = tempdir.path().join("os-release");
+        std::fs::write(&osrel_path, os_release_contents.as_bytes())?;
+
+        // Lock `.osrel` from the UKI (PCR 11, String: .osrel)
+        if let Some(prediction) = self.systemd_pcrlock_json(&vec![
+            OsString::from("lock-raw"),
+            OsString::from("--pcr=11"),
+            (&osrel_path).into(),
+        ])? {
+            records.extend(prediction.records);
+        }
+
+        // Measure the `.cmdline` section name
+        if let Some(prediction) = self.systemd_pcrlock_section_name(".cmdline")? {
+            records.extend(prediction.records);
+        }
 
         // Write the cmdline to a file so we can easily provide it to
         // systemd-pcrlock.
-        //
-        // TODO: see if we can use stdin with systemd-pcrlock instead.
         let cmdline_path = tempdir.path().join("cmdline");
         std::fs::write(&cmdline_path, kernel_cmdline.join(" "))?;
 
-        // Lock the kernel command-line (PCR 9).
-        self.systemd_pcrlock(&vec![
+        // Lock `.cmdline` from the UKI (PCR 11, String: .cmdline).
+        if let Some(prediction) = self.systemd_pcrlock_json(&vec![
+            OsString::from("lock-raw"),
+            OsString::from("--pcr=11"),
+            (&cmdline_path).into(),
+        ])? {
+            records.extend(prediction.records);
+        }
+
+        // Measure the `.initrd` section name
+        if let Some(prediction) = self.systemd_pcrlock_section_name(".initrd")? {
+            records.extend(prediction.records);
+        }
+
+        // Lock `.initrd` from the UKI (PCR 11, String: .initrd)
+        if let Some(prediction) = self.systemd_pcrlock_json(&vec![
+            OsString::from("lock-raw"),
+            OsString::from("--pcr=11"),
+            initrd_target.into(),
+        ])? {
+            records.extend(prediction.records);
+        }
+
+        // Lock the kernel command-line (PCR 9, Linux: kernel command line).
+        if let Some(prediction) = self.systemd_pcrlock_json(&vec![
             OsString::from("lock-kernel-cmdline"),
-            format!(
-                "--pcrlock={}.pcrlock",
-                self.systemd_pcrlock
-                    .join("710-kernel-cmdline.pcrlock.d")
+            OsString::from("--pcrlock=-"), // Needed to avoid writing to a file.
+            cmdline_path.to_owned().into(),
+        ])? {
+            records.extend(prediction.records);
+        }
+
+        // Write the final predictions.
+        if records.len() > 0 && !self.systemd_pcrlock_predictions.is_empty() {
+            let pcrlock_directory = self.systemd_pcrlock_predictions.join("650-lanzaboote.pcrlock.d");
+            let pcrlock_file_path = format!(
+                "{}.pcrlock",
+                pcrlock_directory.clone()
                     .join(&stub_name)
                     .to_str()
                     .unwrap(),
-            ).into(),
-            (&cmdline_path).into(),
-        ])?;
+            );
+            std::fs::create_dir_all(pcrlock_directory)?;
+            let pcrlock_file = std::fs::File::create(pcrlock_file_path)?;
+            let mut writer = std::io::BufWriter::new(pcrlock_file);
+            serde_json::to_writer(&mut writer, &PcrlockPrediction { records })?;
+            writer.flush()?;
+        }
 
         Ok(())
     }
@@ -401,7 +469,7 @@ impl<S: Signer> Installer<S> {
                     OsString::from("lock-pe"),
                     format!(
                         "--pcrlock={}.pcrlock",
-                        self.systemd_pcrlock
+                        self.systemd_pcrlock_predictions
                             .join("630-boot-loader.pcrlock.d")
                             .join(to.file_name().unwrap())
                             .to_str()
@@ -428,7 +496,7 @@ impl<S: Signer> Installer<S> {
             OsString::from("--pcr=5"),
             format!(
                 "--pcrlock={}",
-                self.systemd_pcrlock
+                self.systemd_pcrlock_predictions
                     .join("640-boot-loader-config.pcrlock.d/generated.pcrlock")
                     .to_str()
                     .unwrap(),
@@ -440,7 +508,7 @@ impl<S: Signer> Installer<S> {
     }
 
     fn systemd_pcrlock(&self, args: &Vec<OsString>) -> Result<()> {
-        if self.systemd.is_empty() {
+        if self.systemd.is_empty() || self.systemd_pcrlock_predictions.is_empty() {
             return Ok(())
         }
         let systemd_pcrlock = self
@@ -461,6 +529,92 @@ impl<S: Signer> Installer<S> {
 
         Ok(())
     }
+
+    fn systemd_pcrlock_json(&self, args: &Vec<OsString>) -> Result<Option<PcrlockPrediction>> {
+        if self.systemd.is_empty() {
+            return Ok(None)
+        }
+        let systemd_pcrlock = self
+            .systemd
+            .join("lib/systemd/systemd-pcrlock");
+
+        let output = Command::new(systemd_pcrlock)
+            .arg("--json=short")
+            .args(args)
+            .output()
+            .context("Failed to run systemd-pcrlock. Most likely, the binary is not on PATH.")?;
+        if !output.status.success() {
+            std::io::stderr()
+                .write_all(&output.stderr)
+                .context("Failed to write output of systemd-pcrlock to stderr.")?;
+            log::debug!("systemd-pcrlock failed with args: `{args:?}`.");
+            return Err(anyhow!("Failed to run systemd-pcrlock."));
+        }
+
+        let prediction: PcrlockPrediction = serde_json::from_slice(&output.stdout.as_slice()).context("Failed to read systemd-pcrlock JSON")?;
+
+        Ok(Some(prediction))
+    }
+
+    fn systemd_pcrlock_section_name(&self, name: &str) -> Result<Option<PcrlockPrediction>> {
+        Ok(self.systemd_pcrlock_stdin(
+            &vec![OsString::from("--pcr=11")],
+            CString::new(name).expect("section name should not contain a null byte").as_bytes_with_nul(),
+        )?)
+    }
+
+    fn systemd_pcrlock_stdin(&self, args: &Vec<OsString>, buf: &[u8]) -> Result<Option<PcrlockPrediction>> {
+        if self.systemd.is_empty() {
+            return Ok(None)
+        }
+        let systemd_pcrlock = self
+            .systemd
+            .join("lib/systemd/systemd-pcrlock");
+
+        let mut cmd = Command::new(systemd_pcrlock)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .arg("--json=short")
+            .arg("lock-raw")
+            .args(args)
+            .arg("/dev/stdin")
+            .spawn()
+            .context("Failed to run systemd-pcrlock. Most likely, the binary is not on PATH.")?;
+
+        let stdin = cmd.stdin.as_mut().unwrap();
+        stdin.write_all(buf).context("Failed to write to stdin of systemd-pcrlock.")?;
+
+        let output = cmd.wait_with_output()?;
+        if !output.status.success() {
+            std::io::stderr()
+                .write_all(&output.stderr)
+                .context("Failed to write output of systemd-pcrlock to stderr.")?;
+            log::debug!("systemd-pcrlock failed with args: `{args:?}`.");
+            return Err(anyhow!("Failed to run systemd-pcrlock."));
+        }
+
+        let prediction: PcrlockPrediction = serde_json::from_slice(&output.stdout.as_slice()).context("Failed to read systemd-pcrlock JSON")?;
+
+        Ok(Some(prediction))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct PcrlockDigest {
+    hash_alg: String,
+    digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PcrlockRecord {
+    pcr: u8,
+    digests: Vec<PcrlockDigest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PcrlockPrediction {
+    records: Vec<PcrlockRecord>,
 }
 
 /// Translate an EFI path to an absolute path on the mounted ESP.
