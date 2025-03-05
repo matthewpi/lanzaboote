@@ -18,6 +18,7 @@ indoc = "2.0.7"
 lanzaboote_tool = { path = "../shared" }
 nix = { version = "0.31.0", default-features = false, features = [ "fs" ] }
 regex = "1.12.2"
+serde = { version = "1.0.228", features = ["derive"] }
 stderrlog = "0.6.0"
 
 
