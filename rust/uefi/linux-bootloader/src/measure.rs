@@ -95,7 +95,7 @@ pub fn measure_image(image: &PeInMemory) -> uefi::Result<u32> {
             measurements += 1;
         }
 
-        // Then measure the section contents.
+        // Get the section contents.
         let Some(data) = pe_section_data(pe_binary, section) else {
             continue;
         };
