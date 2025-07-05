@@ -337,13 +337,15 @@ impl<S: Signer> Installer<S> {
         }
 
         // Lock `.initrd` from the UKI (PCR 11, String: .initrd)
-        if let Some(prediction) = self.systemd_pcrlock_json(&vec![
+        let Some(initrd_prediction) = self.systemd_pcrlock_json(&vec![
             OsString::from("lock-raw"),
             OsString::from("--pcr=11"),
             initrd_target.into(),
-        ])? {
-            records.extend(prediction.records);
-        }
+        ])? else {
+            // TODO: error
+            return Ok(());
+        };
+        records.extend(initrd_prediction.clone().records);
 
         // Lock the kernel command-line (PCR 9, Linux: kernel command line).
         if let Some(prediction) = self.systemd_pcrlock_json(&vec![
@@ -353,6 +355,13 @@ impl<S: Signer> Installer<S> {
         ])? {
             records.extend(prediction.records);
         }
+
+        // Lock the initrd again (PCR 9, Linux: initrd)
+        let mut initrd_pcr9_prediction = initrd_prediction;
+        for record in &mut initrd_pcr9_prediction.records {
+            record.pcr = 9;
+        }
+        records.extend(initrd_pcr9_prediction.records);
 
         // Write the final predictions.
         if records.len() > 0 && !self.systemd_pcrlock_predictions.is_empty() {
