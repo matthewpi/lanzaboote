@@ -347,6 +347,25 @@ impl<S: Signer> Installer<S> {
         };
         records.extend(initrd_prediction.clone().records);
 
+        // Write the lanzaboote predictions.
+        if records.len() > 0 && !self.systemd_pcrlock_predictions.is_empty() {
+            if let Some(file) = stub_name.to_str() {
+                self.write_systemd_pcrlock("650-lanzaboote", file, &PcrlockPrediction { records })?;
+            }
+        }
+
+        // Reset records, we need to separate PCR 9s.
+        //
+        // Previously these were included in the main lanzaboote pcrlock,
+        // however we ran into an issue where running `systemd-pcrlock make-policy`
+        // would result in a credential that gets measured into PCR 12, right
+        // before our PCR 9 measurements, breaking the entire lanzaboote pcrlock.
+        //
+        // Ideally the policy wouldn't be handled as a credential and measured
+        // into PCR 12. See https://github.com/systemd/systemd/issues/33546 for
+        // more details.
+        records = vec![];
+
         // Lock the kernel command-line (PCR 9, Linux: kernel command line).
         if let Some(prediction) = self.systemd_pcrlock_json(&vec![
             OsString::from("lock-kernel-cmdline"),
@@ -363,21 +382,11 @@ impl<S: Signer> Installer<S> {
         }
         records.extend(initrd_pcr9_prediction.records);
 
-        // Write the final predictions.
+        // Write the initrd predictions.
         if records.len() > 0 && !self.systemd_pcrlock_predictions.is_empty() {
-            let pcrlock_directory = self.systemd_pcrlock_predictions.join("650-lanzaboote.pcrlock.d");
-            let pcrlock_file_path = format!(
-                "{}.pcrlock",
-                pcrlock_directory.clone()
-                    .join(&stub_name)
-                    .to_str()
-                    .unwrap(),
-            );
-            std::fs::create_dir_all(pcrlock_directory)?;
-            let pcrlock_file = std::fs::File::create(pcrlock_file_path)?;
-            let mut writer = std::io::BufWriter::new(pcrlock_file);
-            serde_json::to_writer(&mut writer, &PcrlockPrediction { records })?;
-            writer.flush()?;
+            if let Some(file) = stub_name.to_str() {
+                self.write_systemd_pcrlock("670-lanzaboote-initrd", file, &PcrlockPrediction { records })?;
+            }
         }
 
         Ok(())
@@ -518,6 +527,25 @@ impl<S: Signer> Installer<S> {
             ).into(),
             (&self.esp_paths.systemd_boot_loader_config).into(),
         ])?;
+
+        Ok(())
+    }
+
+    fn write_systemd_pcrlock(&self, dir: &str, file: &str, prediction: &PcrlockPrediction) -> Result<()> {
+        let pcrlock_directory = self.systemd_pcrlock_predictions.join(format!("{}.pcrlock.d", dir));
+        std::fs::create_dir_all(pcrlock_directory.clone())?;
+
+        let pcrlock_file = std::fs::File::create(format!(
+            "{}.pcrlock",
+            pcrlock_directory
+                .join(&file)
+                .to_str()
+                .unwrap(),
+        ))?;
+
+        let mut writer = std::io::BufWriter::new(pcrlock_file);
+        serde_json::to_writer(&mut writer, prediction)?;
+        writer.flush()?;
 
         Ok(())
     }
