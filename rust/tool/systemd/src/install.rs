@@ -232,8 +232,9 @@ impl<S: Signer> Installer<S> {
         if let Some(initrd_secrets_script) = &bootspec.initrd_secrets {
             append_initrd_secrets(initrd_secrets_script, &initrd_location, generation.version)?;
         }
+        let initrd_name = format!("initrd-{}", kernel_version);
         let initrd_target = self
-            .install_nixos_ca(&initrd_location, &format!("initrd-{}", kernel_version))
+            .install_nixos_ca(&initrd_location, &initrd_name)
             .context("Failed to install the initrd.")?;
 
         // Assemble, sign and install the Lanzaboote stub.
@@ -375,18 +376,22 @@ impl<S: Signer> Installer<S> {
             records.extend(prediction.records);
         }
 
-        // Lock the initrd again (PCR 9, Linux: initrd)
-        let mut initrd_pcr9_prediction = initrd_prediction;
-        for record in &mut initrd_pcr9_prediction.records {
-            record.pcr = 9;
-        }
-        records.extend(initrd_pcr9_prediction.records);
+        // NOTE: this is disabled because once a pcrlock policy gets generated,
+        // it changes the measurement of PCR 9. I believe this is caused by the
+        // policy being passed as a credential, so for now we will only write
+        // the cmdline.
+
+        // // Lock the initrd again (PCR 9, Linux: initrd)
+        // let mut initrd_pcr9_prediction = initrd_prediction;
+        // for record in &mut initrd_pcr9_prediction.records {
+        //     record.pcr = 9;
+        // }
+        // records.extend(initrd_pcr9_prediction.records);
 
         // Write the initrd predictions.
         if records.len() > 0 && !self.systemd_pcrlock_predictions.is_empty() {
-            if let Some(file) = stub_name.to_str() {
-                self.write_systemd_pcrlock("670-lanzaboote-initrd", file, &PcrlockPrediction { records })?;
-            }
+            let initrd_file_name = self.get_nixos_ca_name(&initrd_location, &initrd_name)?;
+            self.write_systemd_pcrlock("670-lanzaboote-initrd", &initrd_file_name, &PcrlockPrediction { records })?;
         }
 
         Ok(())
@@ -434,17 +439,18 @@ impl<S: Signer> Installer<S> {
         Ok(())
     }
 
+    fn get_nixos_ca_name(&self, from: &Path, label: &str) -> Result<String> {
+        let hash = file_hash(from).context("Failed to read the source file.")?;
+        Ok(format!("{}-{}.efi", label, Base32Unpadded::encode_string(&hash)))
+    }
+
     /// Install a content-addressed file to the `EFI/nixos` directory on the ESP.
     ///
     /// It is automatically added to the garbage collector roots.
     /// The full path to the target file is returned.
     fn install_nixos_ca(&mut self, from: &Path, label: &str) -> Result<PathBuf> {
-        let hash = file_hash(from).context("Failed to read the source file.")?;
-        let to = self.esp_paths.nixos.join(format!(
-            "{}-{}.efi",
-            label,
-            Base32Unpadded::encode_string(&hash)
-        ));
+        let to = self.esp_paths.nixos
+            .join(self.get_nixos_ca_name(from, label)?);
         self.gc_roots.extend([&to]);
         install(from, &to)?;
         Ok(to)
@@ -490,6 +496,8 @@ impl<S: Signer> Installer<S> {
         // previously use pcrlock as the boot loader will likely stay the
         // same but the pcrlock file won't exist.
         for (_, to) in paths {
+            // NOTE: do not add this pcrlock to the gcroot, it is global across all
+            // generations.
             self.systemd_pcrlock(&vec![
                 OsString::from("lock-pe"),
                 format!(
@@ -515,6 +523,8 @@ impl<S: Signer> Installer<S> {
             )
         })?;
 
+        // NOTE: do not add this pcrlock to the gcroot, it is global across all
+        // generations.
         self.systemd_pcrlock(&vec![
             OsString::from("lock-raw"),
             OsString::from("--pcr=5"),
@@ -531,21 +541,18 @@ impl<S: Signer> Installer<S> {
         Ok(())
     }
 
-    fn write_systemd_pcrlock(&self, dir: &str, file: &str, prediction: &PcrlockPrediction) -> Result<()> {
+    fn write_systemd_pcrlock(&mut self, dir: &str, file: &str, prediction: &PcrlockPrediction) -> Result<()> {
         let pcrlock_directory = self.systemd_pcrlock_predictions.join(format!("{}.pcrlock.d", dir));
         std::fs::create_dir_all(pcrlock_directory.clone())?;
 
-        let pcrlock_file = std::fs::File::create(format!(
-            "{}.pcrlock",
-            pcrlock_directory
-                .join(&file)
-                .to_str()
-                .unwrap(),
-        ))?;
+        let pcrlock_path = pcrlock_directory.join(format!("{}.pcrlock", file));
+        let pcrlock_file = std::fs::File::create(pcrlock_path.to_str().unwrap())?;
 
         let mut writer = std::io::BufWriter::new(pcrlock_file);
         serde_json::to_writer(&mut writer, prediction)?;
         writer.flush()?;
+
+        self.gc_roots.extend([&pcrlock_path]);
 
         Ok(())
     }
@@ -594,7 +601,8 @@ impl<S: Signer> Installer<S> {
             return Err(anyhow!("Failed to run systemd-pcrlock."));
         }
 
-        let prediction: PcrlockPrediction = serde_json::from_slice(&output.stdout.as_slice()).context("Failed to read systemd-pcrlock JSON")?;
+        let prediction: PcrlockPrediction = serde_json::from_slice(&output.stdout.as_slice())
+            .context("Failed to read systemd-pcrlock JSON")?;
 
         Ok(Some(prediction))
     }
