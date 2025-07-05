@@ -473,20 +473,26 @@ impl<S: Signer> Installer<S> {
             if newer_systemd_boot_available || !systemd_boot_is_signed {
                 install_signed(&self.signer, from, to)
                     .with_context(|| format!("Failed to install systemd-boot binary to: {to:?}"))?;
-
-                self.systemd_pcrlock(&vec![
-                    OsString::from("lock-pe"),
-                    format!(
-                        "--pcrlock={}.pcrlock",
-                        self.systemd_pcrlock_predictions
-                            .join("630-boot-loader.pcrlock.d")
-                            .join(to.file_name().unwrap())
-                            .to_str()
-                            .unwrap(),
-                    ).into(),
-                    to.into(),
-                ])?;
             }
+        }
+
+        // Always attempt to generate pcrlock files for the boot loaders. This
+        // is necessary to adopt existing lanzaboote setups that didn't
+        // previously use pcrlock as the boot loader will likely stay the
+        // same but the pcrlock file won't exist.
+        for (_, to) in paths {
+            self.systemd_pcrlock(&vec![
+                OsString::from("lock-pe"),
+                format!(
+                    "--pcrlock={}.pcrlock",
+                    self.systemd_pcrlock_predictions
+                        .join("630-boot-loader.pcrlock.d")
+                        .join(to.file_name().unwrap())
+                        .to_str()
+                        .unwrap(),
+                ).into(),
+                to.into(),
+            ])?;
         }
 
         install(
