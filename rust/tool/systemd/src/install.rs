@@ -355,44 +355,44 @@ impl<S: Signer> Installer<S> {
             }
         }
 
-        // Reset records, we need to separate PCR 9s.
-        //
-        // Previously these were included in the main lanzaboote pcrlock,
-        // however we ran into an issue where running `systemd-pcrlock make-policy`
-        // would result in a credential that gets measured into PCR 12, right
-        // before our PCR 9 measurements, breaking the entire lanzaboote pcrlock.
-        //
-        // Ideally the policy wouldn't be handled as a credential and measured
-        // into PCR 12. See https://github.com/systemd/systemd/issues/33546 for
-        // more details.
-        records = vec![];
+        // // Reset records, we need to separate PCR 9s.
+        // //
+        // // Previously these were included in the main lanzaboote pcrlock,
+        // // however we ran into an issue where running `systemd-pcrlock make-policy`
+        // // would result in a credential that gets measured into PCR 12, right
+        // // before our PCR 9 measurements, breaking the entire lanzaboote pcrlock.
+        // //
+        // // Ideally the policy wouldn't be handled as a credential and measured
+        // // into PCR 12. See https://github.com/systemd/systemd/issues/33546 for
+        // // more details.
+        // records = vec![];
 
-        // Lock the kernel command-line (PCR 9, Linux: kernel command line).
-        if let Some(prediction) = self.systemd_pcrlock_json(&vec![
-            OsString::from("lock-kernel-cmdline"),
-            OsString::from("--pcrlock=-"), // Needed to avoid writing to a file.
-            cmdline_path.to_owned().into(),
-        ])? {
-            records.extend(prediction.records);
-        }
-
-        // NOTE: this is disabled because once a pcrlock policy gets generated,
-        // it changes the measurement of PCR 9. I believe this is caused by the
-        // policy being passed as a credential, so for now we will only write
-        // the cmdline.
-
-        // // Lock the initrd again (PCR 9, Linux: initrd)
-        // let mut initrd_pcr9_prediction = initrd_prediction;
-        // for record in &mut initrd_pcr9_prediction.records {
-        //     record.pcr = 9;
+        // // Lock the kernel command-line (PCR 9, Linux: kernel command line).
+        // if let Some(prediction) = self.systemd_pcrlock_json(&vec![
+        //     OsString::from("lock-kernel-cmdline"),
+        //     OsString::from("--pcrlock=-"), // Needed to avoid writing to a file.
+        //     cmdline_path.to_owned().into(),
+        // ])? {
+        //     records.extend(prediction.records);
         // }
-        // records.extend(initrd_pcr9_prediction.records);
 
-        // Write the initrd predictions.
-        if records.len() > 0 && !self.systemd_pcrlock_predictions.is_empty() {
-            let initrd_file_name = self.get_nixos_ca_name(&initrd_location, &initrd_name)?;
-            self.write_systemd_pcrlock("670-lanzaboote-initrd", &initrd_file_name, &PcrlockPrediction { records })?;
-        }
+        // // NOTE: this is disabled because once a pcrlock policy gets generated,
+        // // it changes the measurement of PCR 9. I believe this is caused by the
+        // // policy being passed as a credential, so for now we will only write
+        // // the cmdline.
+
+        // // // Lock the initrd again (PCR 9, Linux: initrd)
+        // // let mut initrd_pcr9_prediction = initrd_prediction;
+        // // for record in &mut initrd_pcr9_prediction.records {
+        // //     record.pcr = 9;
+        // // }
+        // // records.extend(initrd_pcr9_prediction.records);
+
+        // // Write the initrd predictions.
+        // if records.len() > 0 && !self.systemd_pcrlock_predictions.is_empty() {
+        //     let initrd_file_name = self.get_nixos_ca_name(&initrd_location, &initrd_name)?;
+        //     self.write_systemd_pcrlock("670-lanzaboote-initrd", &initrd_file_name, &PcrlockPrediction { records })?;
+        // }
 
         Ok(())
     }
