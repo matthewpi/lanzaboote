@@ -25,7 +25,7 @@ let
     ${cfg.installCommand} \
       --public-key ${cfg.publicKeyFile} \
       --private-key ${cfg.privateKeyFile} \
-      --systemd-pcrlock /var/lib/pcrlock.d \
+      --systemd-pcrlock-predictions /var/lib/pcrlock.d \
       ${efiSysMountPoint} \
       /nix/var/nix/profiles/system-*-link
   '';

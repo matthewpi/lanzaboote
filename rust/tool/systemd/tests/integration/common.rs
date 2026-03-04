@@ -193,7 +193,7 @@ pub fn lanzaboote_install(
         .arg(test_systemd)
         .arg("--systemd-boot-loader-config")
         .arg(test_loader_config_path.path())
-        .arg("--systemd-pcrlock")
+        .arg("--systemd-pcrlock-predictions")
         .arg(esp_mountpoint)
         .arg("--public-key")
         .arg("tests/fixtures/uefi-keys/db.pem")

@@ -47,7 +47,7 @@ struct InstallCommand {
 
     /// Systemd-pcrlock directory
     #[arg(long)]
-    systemd_pcrlock: PathBuf,
+    systemd_pcrlock_predictions: PathBuf,
 
     /// Allow installing unsigned artifacts
     #[arg(long, num_args = 1)]
@@ -113,7 +113,7 @@ fn install(args: InstallCommand) -> Result<()> {
         Architecture::from_nixos_system(&args.system)?,
         args.systemd,
         args.systemd_boot_loader_config,
-        args.systemd_pcrlock,
+        args.systemd_pcrlock_predictions,
         args.configuration_limit,
         args.bootcounting_initial_tries,
         args.esp,
